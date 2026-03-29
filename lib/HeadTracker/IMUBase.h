@@ -8,6 +8,7 @@ public:
     virtual ~IMUBase() = default;
 
     virtual bool initialize() = 0;
+    virtual bool isFake() const { return false; }
     void setInterruptHandler(int pin);
 
     bool readIMUData(FusionVector &accel, FusionVector &gyro);

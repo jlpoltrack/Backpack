@@ -14,6 +14,7 @@
 #include "ICMSeries.h"
 #include "MPU6050.h"
 #include "QMI8658C.h"
+#include "FakeIMU.h"
 #include "Fusion.h"
 
 static HeadTrackerState ht_state = STATE_ERROR;
@@ -52,24 +53,26 @@ static void initialize()
             }
             else {
                 delete imu;
-                ht_state = STATE_ERROR;
-                return;
+                imu = new FakeIMU();
+                imu->initialize();
+                DBGLN("No IMU found, using fake sweep generator")
             }
         }
     }
-    imu->setInterruptHandler(PIN_INT);
+    if (!imu->isFake()) {
+        imu->setInterruptHandler(PIN_INT);
 
-    FusionAhrsInitialise(&ahrs);
-    // Set AHRS algorithm settings
-    const FusionAhrsSettings settings = {
-            .convention = FusionConventionNwu,
-            .gain = 0.5f,
-            .gyroscopeRange = imu->getGyroRange(), /* replace this with actual gyroscope range in degrees/s */
-            .accelerationRejection = 10.0f,
-            .magneticRejection = 10.0f,
-            .recoveryTriggerPeriod = 5U * imu->getSampleRate(), /* 5 seconds */
-    };
-    FusionAhrsSetSettings(&ahrs, &settings);
+        FusionAhrsInitialise(&ahrs);
+        const FusionAhrsSettings settings = {
+                .convention = FusionConventionNwu,
+                .gain = 0.5f,
+                .gyroscopeRange = imu->getGyroRange(),
+                .accelerationRejection = 10.0f,
+                .magneticRejection = 10.0f,
+                .recoveryTriggerPeriod = 5U * imu->getSampleRate(),
+        };
+        FusionAhrsSetSettings(&ahrs, &settings);
+    }
     DBGLN("starting head tracker");
     ht_state = STATE_RUNNING;
 }
@@ -136,6 +139,15 @@ static void rotate(float pn[3], const float rot[3]) {
 
 static int timeout()
 {
+    if (imu->isFake()) {
+        float t = millis() / 1000.0f;
+        constexpr float omega = 2.0f * M_PI * 2.0f; // 2 Hz
+        euler.angle.yaw   = 180.0f * sinf(omega * t);
+        euler.angle.pitch = 180.0f * sinf(omega * t + 2.094f); // +120 deg
+        euler.angle.roll  = 180.0f * sinf(omega * t + 4.189f); // +240 deg
+        return 10; // 100 Hz update
+    }
+
     FusionVector a;
     FusionVector g;
 
