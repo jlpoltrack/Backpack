@@ -426,11 +426,13 @@ void SetSoftMACAddress()
   #if defined(PLATFORM_ESP8266)
     WiFi.setOutputPower(10);
   #elif defined(PLATFORM_ESP32)
-    WiFi.setTxPower(WIFI_POWER_8_5dBm);
-    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
   #endif
   WiFi.begin("network-name", "pass-to-network", 1);
   WiFi.disconnect();
+
+  esp_wifi_config_espnow_rate(WIFI_IF_STA, WIFI_PHY_RATE_11M_S);
 
   // Soft-set the MAC address to the passphrase UID for binding
   #if defined(PLATFORM_ESP8266)
@@ -540,6 +542,10 @@ void setup()
     #endif
 
     esp_now_register_recv_cb(OnDataRecv);
+
+  #if defined(PIN_TX_GATE)
+    pinMode(PIN_TX_GATE, INPUT);
+  #endif
   }
 
   devicesStart();
@@ -604,8 +610,13 @@ void loop()
     bool timeoutHit = mavlink.GetQueuedMsgCount() > 0 && (now - lastMavlinkFlush) > MAVLINK_BUF_TIMEOUT;
     if (thresholdHit || timeoutHit)
     {
-      sendMAVLinkViaEspnow();
-      lastMavlinkFlush = now;
+#if defined(PIN_TX_GATE)
+      if (digitalRead(PIN_TX_GATE) == HIGH)
+#endif
+      {
+        sendMAVLinkViaEspnow();
+        lastMavlinkFlush = now;
+      }
     }
   }
 #endif

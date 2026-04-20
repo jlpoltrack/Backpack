@@ -27,6 +27,21 @@ uint8_t downlinkBuf[1024];
 volatile uint16_t downlinkHead = 0;
 volatile uint16_t downlinkTail = 0;
 
+// Stats (updated from ISR callbacks, read/reset from loop)
+volatile int32_t  rssiSum = 0;
+volatile uint16_t rssiCount = 0;
+volatile uint16_t rxRetryCount = 0;
+volatile uint16_t rxFrameCount = 0;
+volatile uint32_t sendOkCount = 0;
+volatile uint32_t sendFailCount = 0;
+volatile uint8_t  lastSigMode = 0;  // 0=11b/g, 1=HT(11n)
+volatile uint8_t  lastRate = 0;
+uint32_t lastStatsPrint = 0;
+
+#define STATS_UART Serial1
+#define STATS_UART_TX_PIN 43
+#define STATS_UART_BAUD 115200
+
 /////////// ESP-NOW CALLBACKS ///////////
 
 // Downlink: ESP-NOW -> ring buffer (unsafe to call Serial.write from WiFi task on USB CDC)
@@ -48,6 +63,33 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *data, int data_len)
   }
 }
 
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
+{
+  if (status == ESP_NOW_SEND_SUCCESS)
+    sendOkCount++;
+  else
+    sendFailCount++;
+}
+
+// Promiscuous RX: capture RSSI and 802.11 retry bit from TX backpack frames
+void promiscuousRxCb(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+  if (type != WIFI_PKT_MGMT) return;
+
+  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+  // Address 2 (source/transmitter) is at offset 10 in the 802.11 MAC header
+  if (memcmp(pkt->payload + 10, txBackpackAddress, 6) != 0) return;
+
+  rssiSum += pkt->rx_ctrl.rssi;
+  rssiCount++;
+  rxFrameCount++;
+  lastSigMode = pkt->rx_ctrl.sig_mode;
+  lastRate = pkt->rx_ctrl.rate;
+  // Frame Control byte 1, bit 3 = Retry bit
+  if (pkt->payload[1] & 0x08)
+    rxRetryCount++;
+}
+
 /////////// MAC ADDRESS SETUP ///////////
 
 void SetCompanionMACAddress()
@@ -61,11 +103,12 @@ void SetCompanionMACAddress()
   mac[5] ^= 0x01;
 
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
   WiFi.begin("network-name", "pass-to-network", 1);
   WiFi.disconnect();
 
+  esp_wifi_config_espnow_rate(WIFI_IF_STA, WIFI_PHY_RATE_11M_S);
   esp_wifi_set_mac(WIFI_IF_STA, mac);
 
   // TX backpack address is the standard UID-derived MAC (first byte even, no XOR)
@@ -130,6 +173,8 @@ void setup()
   Serial.setRxBufferSize(4096);
   Serial.begin(460800);
 
+  STATS_UART.begin(STATS_UART_BAUD, SERIAL_8N1, -1, STATS_UART_TX_PIN);
+
   options_init();
 
   SetCompanionMACAddress();
@@ -150,8 +195,13 @@ void setup()
   }
 
   esp_now_register_recv_cb(OnDataRecv);
+  esp_now_register_send_cb(OnDataSent);
+
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&promiscuousRxCb);
 
   DBGLN("MAVLink companion started");
+  STATS_UART.println("MAVLink companion started");
 }
 
 /////////// LOOP ///////////
@@ -203,6 +253,31 @@ void loop()
   {
     flushUplinkBuf();
     lastUplinkFlush = now;
+  }
+
+  // Print stats once per second on dedicated UART
+  if (now - lastStatsPrint >= 1000)
+  {
+    int32_t avgRssi = rssiCount > 0 ? rssiSum / (int32_t)rssiCount : 0;
+    uint16_t rCnt = rssiCount;
+    uint16_t retries = rxRetryCount;
+    uint16_t frames = rxFrameCount;
+    uint32_t txOk = sendOkCount;
+    uint32_t txFail = sendFailCount;
+
+    rssiSum = 0;
+    rssiCount = 0;
+    rxRetryCount = 0;
+    rxFrameCount = 0;
+    sendOkCount = 0;
+    sendFailCount = 0;
+
+    // sig_mode: 0=11b/g (non-HT), 1=HT(11n); 11b rates: 0=1M,1=2M,2=5.5M,3=11M
+    const char *phy = (lastSigMode == 0) ? "11b/g" : "11n";
+    STATS_UART.printf("RSSI: %d dBm (%u pkts) | RX retry: %u/%u | TX: %u ok %u fail | PHY: %s rate: %u\r\n",
+                      (int)avgRssi, rCnt, retries, frames, txOk, txFail, phy, lastRate);
+
+    lastStatsPrint = now;
   }
 }
 
